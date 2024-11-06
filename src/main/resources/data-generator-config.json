@@ -1,0 +1,57 @@
+{
+  "stores": [
+    {
+      "name": "HuaweiAppStore",
+      "probability" : 0.25
+    },
+    {
+      "name": "AppleAppStore",
+      "probability" : 0.25
+    },
+    {
+      "name": "GooglePlay",
+      "probability" : 0.25
+    },
+    {
+      "name": "RuStore",
+      "probability" : 0.25
+    }
+  ],
+  "appIds": [
+    {
+      "name": "2616001479570096825",
+      "probability" : 0.25
+    },
+    {
+      "name": "4091758100234781984",
+      "probability" : 0.25
+    },
+    {
+      "name": "9102759165103862720",
+      "probability" : 0.25
+    },
+    {
+      "name": "1045619379553910805",
+      "probability" : 0.25
+    }
+  ],
+  "eventTypes": [
+    {
+      "name": "page_view",
+      "probability" : 0.25
+    },
+    {
+      "name": "install",
+      "probability" : 0.25
+    },
+    {
+      "name": "uninstall",
+      "probability" : 0.25
+    },
+    {
+      "name": "error",
+      "probability" : 0.25
+    }
+  ],
+  "eventTimeFreqMillis": 1000
+}
