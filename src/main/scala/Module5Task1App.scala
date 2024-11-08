@@ -1,14 +1,16 @@
 import module5.{Config, EventType}
 import module5generator._
 import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
-import org.apache.flink.api.common.state.{ListStateDescriptor, MapStateDescriptor, ValueStateDescriptor}
-import org.apache.flink.streaming.api.datastream.DataStreamSource
+import org.apache.flink.api.common.state.{ListStateDescriptor, MapState, MapStateDescriptor, State, ValueState, ValueStateDescriptor}
+import org.apache.flink.configuration.Configuration
+import org.apache.flink.streaming.api.datastream.{DataStream, DataStreamSource}
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
-import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction
+import org.apache.flink.streaming.api.functions.windowing.{ProcessAllWindowFunction, ProcessWindowFunction}
 import org.apache.flink.streaming.api.functions.{KeyedProcessFunction, ProcessFunction}
-import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows
-import org.apache.flink.streaming.api.windowing.triggers.{Trigger, TriggerResult}
-import org.apache.flink.streaming.api.windowing.windows.GlobalWindow
+import org.apache.flink.streaming.api.windowing.assigners.{EventTimeSessionWindows, GlobalWindows, ProcessingTimeSessionWindows}
+import org.apache.flink.streaming.api.windowing.time.Time
+import org.apache.flink.streaming.api.windowing.triggers.{ProcessingTimeTrigger, Trigger, TriggerResult}
+import org.apache.flink.streaming.api.windowing.windows.{GlobalWindow, TimeWindow}
 import org.apache.flink.util.{Collector, OutputTag}
 
 import java.lang
@@ -18,20 +20,16 @@ import scala.jdk.CollectionConverters._
 object Module5Task1App {
 
   val maxOutOfOrderness: Duration = java.time.Duration.ofMillis(1000L)
-  private val installReportThreshold = 100
-  private val uninstallReportThreshold = 50
-  private val errorRateReportFreq = java.time.Duration.ofMillis(10000L)
+  private val installReportThreshold = 20
+  private val uninstallReportThreshold = 10
+  private val errorRateReportFreq = 2000L
   private val numberOfTopPlacesToReport = 3
 
-  val configFileName = "data-generator-config.json"
+  val configFileName = "/data-generator-config.json"
   val stores = Config.getConfig(configFileName).stores.keys.toSeq
 
   def getIndicatorOfEventType(event: Event, eventType: EventType): Int = {
-    val currEventType = EventType.getByName(event.eventType) match {
-      case Some(eventType) => eventType
-      case None => throw new RuntimeException(s"Invalid EventType found: `${event.eventType}`")
-    }
-    if (currEventType == eventType) 1 else 0
+    if (event.eventType == eventType) 1 else 0
   }
 
   class InstallUninstallTrigger extends Trigger[Event, GlobalWindow] {
@@ -100,14 +98,8 @@ object Module5Task1App {
 
       fireAndPurgeCriterion(currentInstallCounter, currentUninstallCounter) match {
         case true =>
-          installCounterState.update(installIndicator)
-          uninstallCounterState.update(uninstallIndicator)
-          installCounterByAppIdState.keys().asScala.foreach(store => {
-            installCounterByAppIdState.remove(store)
-          })
-          uninstallCounterByAppIdState.keys().asScala.foreach(store => {
-            uninstallCounterByAppIdState.remove(store)
-          })
+          installCounterState.update(0)
+          uninstallCounterState.update(0)
           TriggerResult.FIRE_AND_PURGE
         case false =>
           installCounterState.update(currentInstallCounter)
@@ -147,14 +139,15 @@ object Module5Task1App {
     }
   }
 
-  class ErrorRateTrigger extends Trigger[Event, GlobalWindow] {
+  class ErrorRateTrigger extends Trigger[Event, TimeWindow] {
 
     override def onElement(
                             element: Event,
                             timestamp: Long,
-                            window: GlobalWindow,
+                            window: TimeWindow,
                             ctx: Trigger.TriggerContext
                           ): TriggerResult = {
+
       val errorCounterByStoreState = ctx.getPartitionedState(
         new MapStateDescriptor(
           "error-counter-by-store",
@@ -164,71 +157,46 @@ object Module5Task1App {
       )
 
       if (getIndicatorOfEventType(element, EventType.Error) == 1) {
-        if (errorCounterByStoreState.contains(element.appId)) {
-          val currCounter = errorCounterByStoreState.get(element.appId)
-          errorCounterByStoreState.put(element.appId, currCounter + 1)
+        if (errorCounterByStoreState.contains(element.store)) {
+          val currCounter = errorCounterByStoreState.get(element.store)
+          errorCounterByStoreState.put(element.store, currCounter + 1)
         }
         else {
-          errorCounterByStoreState.put(element.appId, 1)
+          errorCounterByStoreState.put(element.store, 1)
         }
       }
 
+      ctx.registerProcessingTimeTimer(window.maxTimestamp)
       TriggerResult.CONTINUE
     }
 
-    override def onProcessingTime(
-                                   time: Long,
-                                   window: GlobalWindow,
-                                   ctx: Trigger.TriggerContext
-                                 ): TriggerResult = {
+    override def onProcessingTime(time: Long, window: TimeWindow, ctx: Trigger.TriggerContext): TriggerResult = {
+      println(s"ERROR RATE TRIGGERED ON PROCESSING TIME !!!")
+      TriggerResult.FIRE
+    }
+
+    override def onEventTime(time: Long, window: TimeWindow, ctx: Trigger.TriggerContext): TriggerResult = {
+      println(s"ERROR RATE TRIGGERED ON EVENT TIME !!!")
       TriggerResult.CONTINUE
     }
 
-    override def onEventTime(
-                              time: Long,
-                              window: GlobalWindow,
-                              ctx: Trigger.TriggerContext
-                            ): TriggerResult = {
-      val errorCounterByStoreState = ctx.getPartitionedState(
-        new MapStateDescriptor(
-          "error-counter-by-store",
-          classOf[String],
-          classOf[Int]
-        )
-      )
+    override def canMerge: Boolean = true
 
-      val lastFiredTimeState = ctx.getPartitionedState(
-        new ValueStateDescriptor(
-          "last-fired-time",
-          classOf[Instant]
-        )
-      )
-
-      val lastFiredTime = lastFiredTimeState.value()
-
-      val nowTime = java.time.Instant.now()
-      nowTime.isAfter(lastFiredTime.plus(errorRateReportFreq)) match {
-        case true =>
-          lastFiredTimeState.update(nowTime)
-          errorCounterByStoreState.keys().asScala.foreach(store => {
-            errorCounterByStoreState.remove(store)
-          })
-          TriggerResult.FIRE_AND_PURGE
-        case false =>
-          TriggerResult.CONTINUE
-      }
+    override def onMerge(window: TimeWindow, ctx: Trigger.OnMergeContext): Unit = {
+      val windowMaxTimestamp = window.maxTimestamp
+      if (windowMaxTimestamp > ctx.getCurrentProcessingTime) ctx.registerProcessingTimeTimer(windowMaxTimestamp)
     }
 
-    override def clear(window: GlobalWindow, ctx: Trigger.TriggerContext): Unit = {
-      TriggerResult.PURGE
+    override def clear(window: TimeWindow, ctx: Trigger.TriggerContext): Unit = {
+      ctx.deleteProcessingTimeTimer(window.maxTimestamp)
     }
   }
 
 
+
   val env = StreamExecutionEnvironment.createLocalEnvironment()
 
-  val startTime: Instant = Instant.parse("2023-07-15T00:00:00.000Z")
-  val eventStream: DataStreamSource[Event] = env.addSource(new EventGenerator(1, startTime))
+  val eventStream: DataStreamSource[Event] = env.addSource(new EventGenerator)
 
   def impl(): Unit = {
 
@@ -242,9 +210,9 @@ object Module5Task1App {
         })
     )
 
-    val errorRateReportOutputTag = new OutputTag[String]("error-rate-report") {}
+    val errorRateReportOutputTag = new OutputTag[Event]("error-rate-report") {}
 
-    val nonErrorEventStream = eventStream
+    val nonErrorEventStream = eventStreamWithWatermark
       .process(new ProcessFunction[Event, Event] {
         override def processElement(event: Event, ctx: ProcessFunction[Event, Event]#Context, out: Collector[Event]): Unit = {
           getIndicatorOfEventType(event, EventType.Error) match {
@@ -254,26 +222,32 @@ object Module5Task1App {
         }
       })
 
-    nonErrorEventStream
+    val installUninstallOutputStream = nonErrorEventStream
       .keyBy((event: Event) => event.store)
       .window(GlobalWindows.create())
       .trigger(new InstallUninstallTrigger)
       .process(new ProcessWindowFunction[Event, String, String, GlobalWindow] {
 
-        val installCounterByAppIdState = getRuntimeContext.getMapState(
-          new MapStateDescriptor(
-            "install-counter-by-app-id",
-            classOf[String],
-            classOf[Int]
+        var installCounterByAppIdState: MapState[String, Int] = _
+
+        var uninstallCounterByAppIdState: MapState[String, Int] = _
+
+        override def open(parameters: Configuration): Unit = {
+          installCounterByAppIdState = getRuntimeContext.getMapState(
+            new MapStateDescriptor(
+              "install-counter-by-app-id",
+              classOf[String],
+              classOf[Int]
+            )
           )
-        )
-        val uninstallCounterByAppIdState = getRuntimeContext.getMapState(
-          new MapStateDescriptor(
-            "uninstall-counter-by-app-id",
-            classOf[String],
-            classOf[Int]
+          uninstallCounterByAppIdState = getRuntimeContext.getMapState(
+            new MapStateDescriptor(
+              "uninstall-counter-by-app-id",
+              classOf[String],
+              classOf[Int]
+            )
           )
-        )
+        }
 
         def getTopInstallUninstallLog(
                                      store: String,
@@ -281,7 +255,7 @@ object Module5Task1App {
                                      topUninstalled: List[(String, Int)]
                                      ) = {
           val nowTime = java.time.Instant.now().toString
-          s"[${nowTime}] Store: ${store}" +
+          s"[${nowTime}] Store: ${store} " +
             s"Top ${topInstalled.size} installed: ${
               topInstalled.map(appAndCnt => s"${appAndCnt._1} (${appAndCnt._2})").mkString(", ")
             } " +
@@ -312,12 +286,67 @@ object Module5Task1App {
               .take(numberOfTopPlacesToReport)
               .toList
 
-          getTopInstallUninstallLog(key, topAppsByInstall, topAppsByUninstall)
+          installCounterByAppIdState.clear()
+          uninstallCounterByAppIdState.clear()
+
+          out.collect(getTopInstallUninstallLog(key, topAppsByInstall, topAppsByUninstall))
+        }
+      })
+
+    val errorSideOutputEventStream: DataStream[Event] = nonErrorEventStream.getSideOutput(errorRateReportOutputTag)
+
+    val errorOutputStream = errorSideOutputEventStream
+      .windowAll(ProcessingTimeSessionWindows.withGap(Time.milliseconds(errorRateReportFreq)))
+      .trigger(new ErrorRateTrigger)
+      .process(new ProcessAllWindowFunction[Event, String, TimeWindow] {
+
+        var errorCounterByStoreState: MapState[String, Int] = _
+
+        override def open(parameters: Configuration): Unit = {
+          errorCounterByStoreState = getRuntimeContext.getMapState(
+            new MapStateDescriptor(
+              "error-counter-by-store",
+              classOf[String],
+              classOf[Int]
+            )
+          )
         }
 
-        // TODO: PROCESS SIDE OUTPUT (ERRORS) TOO !!!
-        
+        /*def getErrorRateLog(store: String, errorCounter: Int): String = {
+          val nowTime = java.time.Instant.now().toString
+          s"[${nowTime}] Store: ${store} Error count: ${errorCounter}"
+        }*/
+
+        def getErrorRateLog(errorCounterByStore: Map[String, Int]): String = {
+          val nowTime = java.time.Instant.now().toString
+          s"[${nowTime}] ${errorCounterByStore.map(
+            storeAndCnt => s"Store: ${storeAndCnt._1} Error count: ${storeAndCnt._2}"
+          ).mkString(" ")}"
+        }
+
+        override def process(
+                              context: ProcessAllWindowFunction[Event, String, TimeWindow]#Context,
+                              elements: lang.Iterable[Event],
+                              out: Collector[String]
+                            ): Unit = {
+
+          //val storeErrorCount = errorCounterByStoreState.get(store)
+          //errorCounterByStoreState.remove(store)
+          //out.collect(getErrorRateLog(store, storeErrorCount))
+
+          val errorCounterByStore = stores.map( store =>
+            (store, errorCounterByStoreState.get(store))
+          ).toMap
+
+          out.collect(getErrorRateLog(errorCounterByStore))
+        }
+
       })
+
+    installUninstallOutputStream.print()
+    errorOutputStream.print()
+
+    env.execute()
   }
 
   def main(args: Array[String]): Unit = {

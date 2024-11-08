@@ -1,5 +1,7 @@
 package module5
 
+import java.io.{File, InputStream}
+import java.nio.file.Paths
 import scala.concurrent.duration.Duration
 import scala.io.Source
 import scala.util.Random
@@ -24,16 +26,16 @@ object Config {
   }
 
   private def getConfigFileSafely(configFileName: String): String = {
-    val source = Source
-      .fromFile(configFileName)
-    try {
-      source.mkString
-    } catch {
-      case ex: Exception => throw new RuntimeException(
-        getConfigReadErrorMessage(ex)
-      )
-    } finally {
+
+    val inputStream = getClass.getResourceAsStream(configFileName)
+    if (inputStream != null) {
+      val source = Source.fromInputStream(inputStream)
+      val content = source.mkString
       source.close()
+      content
+    }
+    else {
+      throw new RuntimeException(s"Can't find config file `${configFileName}`")
     }
   }
 
@@ -46,7 +48,7 @@ object Config {
         config("stores").arr
           .map(_.obj)
           .map(store =>
-            (store("store").str, store("store").num)
+            (store("name").str, store("probability").num)
           )
           .toMap
 
@@ -54,7 +56,7 @@ object Config {
         config("appIds").arr
           .map(_.obj)
           .map(store =>
-            (store("store").str, store("store").num)
+            (store("name").str, store("probability").num)
           )
           .toMap
 
@@ -62,11 +64,16 @@ object Config {
         config("eventTypes").arr
           .map(_.obj)
           .map(store =>
-            (store("store").str, store("store").num)
+            (store("name").str, store("probability").num)
           )
           .toMap
 
-      val eventTimeFreqSecondsVal = config("eventTimeFreqSeconds").num.toLong
+      val eventTimeFreqSecondsVal = config("eventTimeFreqMillis").num.toLong
+
+      /*println(storesMap)
+      println(appIdsMap)
+      println(eventTypesMap)
+      println(java.time.Duration.ofMillis(eventTimeFreqSecondsVal))*/
 
       new Config(storesMap, appIdsMap, eventTypesMap, java.time.Duration.ofMillis(eventTimeFreqSecondsVal))
     }

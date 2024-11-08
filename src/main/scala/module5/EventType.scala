@@ -15,7 +15,7 @@ object EventType {
       case "install" => Some(Install)
       case "uninstall" => Some(Uninstall)
       case "page_view" => Some(PageView)
-      case "Error" => Some(Error)
+      case "error" => Some(Error)
       case _ => None
     }
   }
