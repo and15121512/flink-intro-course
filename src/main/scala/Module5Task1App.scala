@@ -7,9 +7,9 @@ import org.apache.flink.streaming.api.datastream.{DataStream, DataStreamSource}
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.functions.windowing.{ProcessAllWindowFunction, ProcessWindowFunction}
 import org.apache.flink.streaming.api.functions.{KeyedProcessFunction, ProcessFunction}
-import org.apache.flink.streaming.api.windowing.assigners.{EventTimeSessionWindows, GlobalWindows, ProcessingTimeSessionWindows}
+import org.apache.flink.streaming.api.windowing.assigners.{EventTimeSessionWindows, GlobalWindows, ProcessingTimeSessionWindows, TumblingEventTimeWindows}
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.api.windowing.triggers.{ProcessingTimeTrigger, Trigger, TriggerResult}
+import org.apache.flink.streaming.api.windowing.triggers.{EventTimeTrigger, ProcessingTimeTrigger, Trigger, TriggerResult}
 import org.apache.flink.streaming.api.windowing.windows.{GlobalWindow, TimeWindow}
 import org.apache.flink.util.{Collector, OutputTag}
 
@@ -20,9 +20,9 @@ import scala.jdk.CollectionConverters._
 object Module5Task1App {
 
   val maxOutOfOrderness: Duration = java.time.Duration.ofMillis(1000L)
-  private val installReportThreshold = 20
-  private val uninstallReportThreshold = 10
-  private val errorRateReportFreq = 2000L
+  private val installReportThreshold = 100
+  private val uninstallReportThreshold = 50
+  private val errorRateReportFreq = Time.milliseconds(10000L)
   private val numberOfTopPlacesToReport = 3
 
   val configFileName = "/data-generator-config.json"
@@ -139,59 +139,6 @@ object Module5Task1App {
     }
   }
 
-  class ErrorRateTrigger extends Trigger[Event, TimeWindow] {
-
-    override def onElement(
-                            element: Event,
-                            timestamp: Long,
-                            window: TimeWindow,
-                            ctx: Trigger.TriggerContext
-                          ): TriggerResult = {
-
-      val errorCounterByStoreState = ctx.getPartitionedState(
-        new MapStateDescriptor(
-          "error-counter-by-store",
-          classOf[String],
-          classOf[Int]
-        )
-      )
-
-      if (getIndicatorOfEventType(element, EventType.Error) == 1) {
-        if (errorCounterByStoreState.contains(element.store)) {
-          val currCounter = errorCounterByStoreState.get(element.store)
-          errorCounterByStoreState.put(element.store, currCounter + 1)
-        }
-        else {
-          errorCounterByStoreState.put(element.store, 1)
-        }
-      }
-
-      ctx.registerProcessingTimeTimer(window.maxTimestamp)
-      TriggerResult.CONTINUE
-    }
-
-    override def onProcessingTime(time: Long, window: TimeWindow, ctx: Trigger.TriggerContext): TriggerResult = {
-      println(s"ERROR RATE TRIGGERED ON PROCESSING TIME !!!")
-      TriggerResult.FIRE
-    }
-
-    override def onEventTime(time: Long, window: TimeWindow, ctx: Trigger.TriggerContext): TriggerResult = {
-      println(s"ERROR RATE TRIGGERED ON EVENT TIME !!!")
-      TriggerResult.CONTINUE
-    }
-
-    override def canMerge: Boolean = true
-
-    override def onMerge(window: TimeWindow, ctx: Trigger.OnMergeContext): Unit = {
-      val windowMaxTimestamp = window.maxTimestamp
-      if (windowMaxTimestamp > ctx.getCurrentProcessingTime) ctx.registerProcessingTimeTimer(windowMaxTimestamp)
-    }
-
-    override def clear(window: TimeWindow, ctx: Trigger.TriggerContext): Unit = {
-      ctx.deleteProcessingTimeTimer(window.maxTimestamp)
-    }
-  }
-
 
 
   val env = StreamExecutionEnvironment.createLocalEnvironment()
@@ -255,7 +202,7 @@ object Module5Task1App {
                                      topUninstalled: List[(String, Int)]
                                      ) = {
           val nowTime = java.time.Instant.now().toString
-          s"[${nowTime}] Store: ${store} " +
+          s"[${nowTime}] INSTALL/UNINSTALL Store: ${store} " +
             s"Top ${topInstalled.size} installed: ${
               topInstalled.map(appAndCnt => s"${appAndCnt._1} (${appAndCnt._2})").mkString(", ")
             } " +
@@ -296,30 +243,17 @@ object Module5Task1App {
     val errorSideOutputEventStream: DataStream[Event] = nonErrorEventStream.getSideOutput(errorRateReportOutputTag)
 
     val errorOutputStream = errorSideOutputEventStream
-      .windowAll(ProcessingTimeSessionWindows.withGap(Time.milliseconds(errorRateReportFreq)))
-      .trigger(new ErrorRateTrigger)
+      .windowAll(TumblingEventTimeWindows.of(errorRateReportFreq))
       .process(new ProcessAllWindowFunction[Event, String, TimeWindow] {
-
-        var errorCounterByStoreState: MapState[String, Int] = _
-
-        override def open(parameters: Configuration): Unit = {
-          errorCounterByStoreState = getRuntimeContext.getMapState(
-            new MapStateDescriptor(
-              "error-counter-by-store",
-              classOf[String],
-              classOf[Int]
-            )
-          )
-        }
-
-        /*def getErrorRateLog(store: String, errorCounter: Int): String = {
-          val nowTime = java.time.Instant.now().toString
-          s"[${nowTime}] Store: ${store} Error count: ${errorCounter}"
-        }*/
+        ////// INFO
+        // Use windowAll to output error report for all stores simultaneously,
+        // rather than each store separately. If it is not necessary, I assume that
+        // grouping by key could be used instead.
+        ////// INFO
 
         def getErrorRateLog(errorCounterByStore: Map[String, Int]): String = {
           val nowTime = java.time.Instant.now().toString
-          s"[${nowTime}] ${errorCounterByStore.map(
+          s"[${nowTime}] ERROR RATE ${errorCounterByStore.map(
             storeAndCnt => s"Store: ${storeAndCnt._1} Error count: ${storeAndCnt._2}"
           ).mkString(" ")}"
         }
@@ -330,13 +264,9 @@ object Module5Task1App {
                               out: Collector[String]
                             ): Unit = {
 
-          //val storeErrorCount = errorCounterByStoreState.get(store)
-          //errorCounterByStoreState.remove(store)
-          //out.collect(getErrorRateLog(store, storeErrorCount))
-
-          val errorCounterByStore = stores.map( store =>
-            (store, errorCounterByStoreState.get(store))
-          ).toMap
+          val errorCounterByStore = elements.asScala
+            .map(_.store)
+            .groupMapReduce(identity)(_ => 1)(_ + _)
 
           out.collect(getErrorRateLog(errorCounterByStore))
         }
