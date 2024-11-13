@@ -20,17 +20,16 @@ import java.lang
 import java.time.Instant
 import scala.jdk.CollectionConverters.IterableHasAsScala
 
-object Module5Task2App {
+object Module5Task2AppOld {
 
   val maxBoundedOutOfOrderness = java.time.Duration.ofMillis(10000L)
   val windowBatchTime = Time.milliseconds(10000L)
   /*val hardwareTopicName = "Hardware"*/
-  val topAcronymsToOutput = 20
+  val topacronymsToOutput = 20
 
   case class TimeOfDay(
                         startHoursFromMidnight: Long,
-                        endHoursFromMidnight: Long,
-                        stringRepr: String
+                        endHoursFromMidnight: Long
                       ) {
     def isHourWithinTimeOfDay(hour: Long): Boolean = {
       hour >= startHoursFromMidnight && hour < endHoursFromMidnight
@@ -39,10 +38,10 @@ object Module5Task2App {
 
   object TimeOfDay {
 
-    val Mourning = TimeOfDay(4, 12, "Mourning")
-    val Day = TimeOfDay(12, 17, "Day")
-    val Evening = TimeOfDay(17, 24, "Evening")
-    val Midnight = TimeOfDay(0, 4, "Midnight")
+    val Mourning = TimeOfDay(4, 12)
+    val Day = TimeOfDay(12, 17)
+    val Evening = TimeOfDay(17, 24)
+    val Midnight = TimeOfDay(0, 4)
 
     def getByInstant(currTime: java.time.Instant): TimeOfDay = {
       val millisInDay = 60 * 60 * 24 * 1000
@@ -61,12 +60,12 @@ object Module5Task2App {
   val startTime: Instant = Instant.parse("2023-07-15T00:00:00.000Z")
 
   case class CommentInput(
-                           @JsonProperty("commentId") var commentId: String,
-                           @JsonProperty("time") var time: Long,
-                           @JsonProperty("user") var user: String,
-                           @JsonProperty("topic") var topic: String,
-                           @JsonProperty("acronim") var acronim: String
-                         )
+                     @JsonProperty("commentId") var commentId: String,
+                     @JsonProperty("time") var time: Long,
+                     @JsonProperty("user") var user: String,
+                     @JsonProperty("topic") var topic: String,
+                     @JsonProperty("acronim") var acronim: String
+                   )
 
   case class Comment(
                       commentId: String,
@@ -76,12 +75,11 @@ object Module5Task2App {
                       time: java.time.Instant
                     )
 
-  case class AcronymStats(
+  case class acronymstats(
                            topic: String,
                            acronim: String,
                            acronymsCounter: Long,
                            totalCommentsCounter: Long,
-                           timeOfDay: String,
                            time: java.time.Instant
                          )
 
@@ -96,7 +94,7 @@ object Module5Task2App {
 
   def impl() = {
 
-    val filePath = new Path("src/main/resources/acronyms_input.csv")
+    val filePath = new Path("src/main/resources/acronyms.csv")
 
     val csvSchema = CsvSchema
       .builder()
@@ -123,24 +121,16 @@ object Module5Task2App {
     /*val hardwareOutputTag = new OutputTag[Comment]("hardware-output-tag") {}*/
 
     val commentInputStream = env.fromSource(
-        source,
-        //////
-        // Due to no orderliness of input file it was sorted by time in advance.
-        // Otherwise, I assume it doesn't make sense to use Flink as Batch processing
-        // tool. If batch processing is required, one could use (for example) TimeSessionWindow
-        // by processing time with large session time lag. This way state backend could be processed
-        // in the same way with TumblingWindow. When batch processing ends (session closes) all stats will
-        // be outputted at once.
-        //////
-        WatermarkStrategy
-          .forBoundedOutOfOrderness(maxBoundedOutOfOrderness)
-          .withTimestampAssigner(new SerializableTimestampAssigner[CommentInput] {
-            override def extractTimestamp(element: CommentInput, recordTimestamp: Long): Long = {
-              element.time
-            }
-          }),
-        "comments-csv"
-      )
+      source,
+      WatermarkStrategy
+        .forBoundedOutOfOrderness(maxBoundedOutOfOrderness)
+        .withTimestampAssigner(new SerializableTimestampAssigner[CommentInput] {
+          override def extractTimestamp(element: CommentInput, recordTimestamp: Long): Long = {
+            element.time
+          }
+        }),
+      "comments-csv"
+    )
       .process(new ProcessFunction[CommentInput, Comment] {
         override def processElement(
                                      commentInput: CommentInput,
@@ -179,14 +169,14 @@ object Module5Task2App {
       // Don't use window for the whole TimeOfDay due to its long duration (otherwise it is
       // possible to have thousands or even millions of events within one window).
       //////
-      .process(new ProcessWindowFunction[Comment, AcronymStats, String, TimeWindow] {
+      .process(new ProcessWindowFunction[Comment, acronymstats, String, TimeWindow] {
 
         //////
-        // For each topic and time of day calculate number of users and acronyms (top N)
+        // For each topic and time of day calculate number of users and acronyms
         // as statistics required by the task.
         //////
         var commentsCounterState: ValueState[Int] = _
-        var commentAcronymsCounterState: MapState[String, Int] = _
+        var commentacronymsCounterState: MapState[String, Int] = _
         var lastTimeOfDayState: ValueState[TimeOfDay] = _
 
         override def open(parameters: Configuration): Unit = {
@@ -197,7 +187,7 @@ object Module5Task2App {
                 classOf[Int]
               )
             )
-          commentAcronymsCounterState = getRuntimeContext
+          commentacronymsCounterState = getRuntimeContext
             .getMapState(
               new MapStateDescriptor[String, Int](
                 "comment-acronyms-counter",
@@ -216,9 +206,9 @@ object Module5Task2App {
 
         override def process(
                               topic: String,
-                              context: ProcessWindowFunction[Comment, AcronymStats, String, TimeWindow]#Context,
+                              context: ProcessWindowFunction[Comment, acronymstats, String, TimeWindow]#Context,
                               comments: lang.Iterable[Comment],
-                              out: Collector[AcronymStats]
+                              out: Collector[acronymstats]
                             ): Unit = {
           //////
           // It is possible for the window to intersect time of day bound (e.g. night and mourning bound).
@@ -230,49 +220,48 @@ object Module5Task2App {
 
           val currentTimeOfDay = TimeOfDay.getByInstant(minCommentTime)
 
-          val isInitial = lastTimeOfDayState.value() == null
+          //println(s"topic: ${topic} minCommentTime: ${minCommentTime} currentTimeOfDay: ${currentTimeOfDay}")
+
           val lastTimeOfDay = lastTimeOfDayState.value()
 
-          val currAcronymsCounter = comments.asScala
+          val curracronymsCounter = comments.asScala
             .map(_.acronim)
             .groupMapReduce(identity)(_ => 1)(_ + _)
 
           if (currentTimeOfDay != lastTimeOfDay) {
 
-            val topAcronyms = commentAcronymsCounterState.keys.asScala.map(appId =>
-                (appId, commentAcronymsCounterState.get(appId))
+            //println(s"ENTERED NEW TIME OF DAY !!! currentTimeOfDay: topic: ${topic} ${currentTimeOfDay} lastTimeOfDay: ${lastTimeOfDay}")
+
+            val topacronyms = commentacronymsCounterState.keys.asScala.map( appId =>
+                (appId, commentacronymsCounterState.get(appId))
               ).toSeq
               .sortBy(-_._2)
-              .take(topAcronymsToOutput)
+              .take(topacronymsToOutput)
               .toList
 
-            if (!isInitial) {
-              topAcronyms.foreach(acronymAndCount => {
-                out.collect(
-                  AcronymStats(
-                    topic,
-                    acronymAndCount._1,
-                    acronymAndCount._2,
-                    commentsCounterState.value(),
-                    currentTimeOfDay.stringRepr,
-                    minCommentTime
-                  )
+            topacronyms.foreach(acronimAndCount => {
+              out.collect(
+                acronymstats(
+                  topic,
+                  acronimAndCount._1,
+                  acronimAndCount._2,
+                  commentsCounterState.value(),
+                  minCommentTime
                 )
-              })
-            }
-
-            commentAcronymsCounterState.clear()
-            currAcronymsCounter.foreach(acronymAndCnt => {
-              commentAcronymsCounterState.put(acronymAndCnt._1, acronymAndCnt._2)
+              )
+            })
+            commentacronymsCounterState.clear()
+            curracronymsCounter.foreach( acronimAndCnt => {
+              commentacronymsCounterState.put(acronimAndCnt._1, acronimAndCnt._2)
             })
             commentsCounterState.update(comments.asScala.size)
 
             lastTimeOfDayState.update(currentTimeOfDay)
           }
           else {
-            currAcronymsCounter.foreach(acronymAndCnt => {
-              val currAcronymsCnt = commentAcronymsCounterState.get(acronymAndCnt._1)
-              commentAcronymsCounterState.put(acronymAndCnt._1, currAcronymsCnt + acronymAndCnt._2)
+            curracronymsCounter.foreach( acronimAndCnt => {
+              val curracronymsCnt = commentacronymsCounterState.get(acronimAndCnt._1)
+              commentacronymsCounterState.put(acronimAndCnt._1, curracronymsCnt + acronimAndCnt._2)
             })
             val currUsersCnt = commentsCounterState.value()
             commentsCounterState.update(currUsersCnt + comments.asScala.size)
@@ -288,6 +277,7 @@ object Module5Task2App {
     //////
 
     acronymsOutputStream.print()
+    //commentInputStream.print()
 
     env.execute()
   }
